@@ -63,14 +63,15 @@ def resolve_combined_oddpos(left, right, new):
 
     # e.g. (1, 2, 4, 5) + (3, 6, 7) -> [1, 2, 4, 5, 3, 6, 7]
     if left.parity and len(r_oddpos) % 2 == 1:
-        # moving right oddpos charges over left sectors will generate sign
+        # moving right oddpos charges over left sectors will generate sign #XXX: why?
         phase = -1
     else:
         phase = 1
-
+    # print('initial phase, loddpos, roddpos: ', phase, l_oddpos, r_oddpos)
     if l_oddpos and r_oddpos and (l_oddpos[-1] > r_oddpos[0]):
         # overlapping -> compute the phase of sorting the oddposs
         perm = tuple(argsort(oddpos))
+        # print('perm: ', perm, 'phase: ', calc_phase_permutation((1,) * len(oddpos), perm))
         phase *= calc_phase_permutation((1,) * len(oddpos), perm)
         # -> [1, 2, 3, 4, 5, 6, 7]
         oddpos = [oddpos[i] for i in perm]
@@ -78,6 +79,7 @@ def resolve_combined_oddpos(left, right, new):
     if phase == -1:
         new.phase_global(inplace=True)
 
+    # print('phase: ', phase, 'lr: ', l_oddpos, r_oddpos, 'new: ', oddpos)
     # trim adjacent conjugate pairs of oddposs
     # e.g. [4+, 3+, 3-, 4-, 5-] -> [4+, 4-, 5-] -> [5-]
     #           ......              ......
@@ -100,7 +102,7 @@ def resolve_combined_oddpos(left, right, new):
         else:
             # check next
             i += 1
-
+    
     new._oddpos = tuple(oddpos)
 
 
@@ -128,9 +130,13 @@ class FermionicArray(AbelianArray):
         the position of the odd rank. The integer must be non-zero so that it
         is still sortable after negation. If a tuple is given, it is assumed to
         be the sorted ordering of subsumed odd ranks. By default empty.
+    symmetry : str or Symmetry, optional
+        The symmetry of the array, if not using a specific symmetry class.
     """
 
     __slots__ = _fermionic_array_slots
+    fermionic = True
+    static_symmetry = False
 
     def __init__(
         self,
@@ -139,8 +145,11 @@ class FermionicArray(AbelianArray):
         blocks=(),
         phases=(),
         oddpos=None,
+        symmetry=None,
     ):
-        super().__init__(indices=indices, charge=charge, blocks=blocks)
+        super().__init__(
+            indices=indices, charge=charge, blocks=blocks, symmetry=symmetry
+        )
         self._phases = dict(phases)
         self._oddpos = oddpos_parse(oddpos, self.parity)
 
@@ -184,7 +193,7 @@ class FermionicArray(AbelianArray):
         new._oddpos = self.oddpos
         return new
 
-    def copy_with(self, indices=None, blocks=None, charge=None, phases=None):
+    def copy_with(self, indices=None, blocks=None, charge=None, phases=None, oddpos=None):
         """Create a copy of this fermionic array with some attributes replaced.
 
         Parameters
@@ -200,7 +209,7 @@ class FermionicArray(AbelianArray):
         """
         new = super().copy_with(indices=indices, blocks=blocks, charge=charge)
         new._phases = self.phases.copy() if phases is None else phases
-        new._oddpos = self.oddpos
+        new._oddpos = self.oddpos if oddpos is None else oddpos
 
         if new.parity:
             assert new._oddpos
@@ -238,7 +247,7 @@ class FermionicArray(AbelianArray):
             new_phases = {}
             for sector in new.sectors:
                 parities = tuple(new.symmetry.parity(q) for q in sector)
-                perm_phase = calc_phase_permutation(parities, axes)
+                perm_phase = calc_phase_permutation(parities, axes) #TODO: make this function deterministic
                 new_phase = old_phases.get(sector, 1) * perm_phase
                 if new_phase == -1:
                     # only populate non-trivial phases
@@ -384,8 +393,9 @@ class FermionicArray(AbelianArray):
             The resolved array, which now has no lazy phases.
         """
         new = self if inplace else self.copy()
-        while new._phases:
-            sector, phase = new._phases.popitem()
+        phases = new.phases
+        while phases:
+            sector, phase = phases.popitem()
             if phase == -1:
                 try:
                     new._blocks[sector] = -new._blocks[sector]
@@ -429,7 +439,9 @@ class FermionicArray(AbelianArray):
         _conj = ar.get_lib_fn(new.backend, "conj")
 
         new._indices = tuple(ix.conj() for ix in new.indices)
-        axs_conj = tuple(ax for ax, ix in enumerate(new._indices) if ix.dual)
+        axs_conj = tuple(
+            ax for ax, ix in enumerate(new._indices) if not ix.dual
+        )
 
         for sector, array in new.blocks.items():
             # conjugate the actual array
@@ -755,6 +767,7 @@ def tensordot_fermionic(a, b, axes=2, preserve_array=False, **kwargs):
 
     if (c.ndim == 0) and (not preserve_array):
         try:
+            c.phase_sync(inplace=True)
             return c.blocks[()]
         except KeyError:
             # no aligned blocks, return zero
@@ -768,7 +781,16 @@ def tensordot_fermionic(a, b, axes=2, preserve_array=False, **kwargs):
 
 class Z2FermionicArray(FermionicArray):
     __slots__ = _fermionic_array_slots
-    symmetry = get_symmetry("Z2")
+    static_symmetry = True
+
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        Z2 = get_symmetry("Z2")
+
+        if (symmetry is not None) and (symmetry != Z2):
+            raise ValueError(f"Expected Z2 symmetry, got {symmetry}.")
+
+        return Z2
 
     def to_pyblock3(self, flat=False):
         from pyblock3.algebra.fermion import SparseFermionTensor, SubTensor
@@ -797,7 +819,16 @@ class Z2FermionicArray(FermionicArray):
 
 class U1FermionicArray(FermionicArray):
     __slots__ = _fermionic_array_slots
-    symmetry = get_symmetry("U1")
+    static_symmetry = True
+
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        U1 = get_symmetry("U1")
+
+        if (symmetry is not None) and (symmetry != U1):
+            raise ValueError(f"Expected U1 symmetry, got {symmetry}.")
+
+        return U1
 
     def to_pyblock3(self, flat=False):
         from pyblock3.algebra.fermion import SparseFermionTensor, SubTensor
@@ -826,9 +857,27 @@ class U1FermionicArray(FermionicArray):
 
 class Z2Z2FermionicArray(FermionicArray):
     __slots__ = _fermionic_array_slots
-    symmetry = get_symmetry("Z2Z2")
+    static_symmetry = True
+
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        Z2Z2 = get_symmetry("Z2Z2")
+
+        if (symmetry is not None) and (symmetry != Z2Z2):
+            raise ValueError(f"Expected Z2Z2 symmetry, got {symmetry}.")
+
+        return Z2Z2
 
 
 class U1U1FermionicArray(FermionicArray):
     __slots__ = _fermionic_array_slots
-    symmetry = get_symmetry("U1U1")
+    static_symmetry = True
+
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        U1U1 = get_symmetry("U1U1")
+
+        if (symmetry is not None) and (symmetry != U1U1):
+            raise ValueError(f"Expected U1U1 symmetry, got {symmetry}.")
+
+        return U1U1

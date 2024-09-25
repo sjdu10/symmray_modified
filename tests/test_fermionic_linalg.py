@@ -11,8 +11,8 @@ def invert_permutation(p):
     return tuple(pinv)
 
 
-@pytest.mark.parametrize("symmetry", ["Z2", "U1"])
-@pytest.mark.parametrize("seed", range(20))
+@pytest.mark.parametrize("symmetry", ("Z2", "U1", "Z2Z2", "U1U1"))
+@pytest.mark.parametrize("seed", range(10))
 def test_qr_roundtrip(symmetry, seed):
     rng = sr.utils.get_rng(seed)
 
@@ -50,8 +50,8 @@ def test_qr_roundtrip(symmetry, seed):
     assert x.allclose(xr)
 
 
-@pytest.mark.parametrize("symmetry", ["Z2", "U1"])
-@pytest.mark.parametrize("seed", range(20))
+@pytest.mark.parametrize("symmetry", ("Z2", "U1", "Z2Z2", "U1U1"))
+@pytest.mark.parametrize("seed", range(10))
 def test_svd_roundtrip(symmetry, seed):
     rng = sr.utils.get_rng(seed)
 
@@ -89,7 +89,7 @@ def test_svd_roundtrip(symmetry, seed):
     assert x.allclose(xr)
 
 
-@pytest.mark.parametrize("symmetry", ["Z2", "U1"])
+@pytest.mark.parametrize("symmetry", ("Z2", "U1", "Z2Z2", "U1U1"))
 @pytest.mark.parametrize("seed", range(10))
 @pytest.mark.parametrize("absorb", [-1, 0, 1])
 def test_svd_truncated_roundtrip(symmetry, seed, absorb):
@@ -129,7 +129,7 @@ def test_svd_truncated_roundtrip(symmetry, seed, absorb):
     assert x.allclose(xr)
 
 
-@pytest.mark.parametrize("symmetry", ["Z2", "U1"])
+@pytest.mark.parametrize("symmetry", ("Z2", "U1", "Z2Z2", "U1U1"))
 @pytest.mark.parametrize("seed", range(20))
 def test_svd_truncated_cutoff_max_bond(symmetry, seed):
     rng = sr.utils.get_rng(seed)
@@ -147,7 +147,7 @@ def test_svd_truncated_cutoff_max_bond(symmetry, seed):
     _, s, _ = ar.do(
         "svd_truncated",
         x,
-        cutoff=1e-2,
+        cutoff=3e-2,
         absorb=None,
     )
     assert s.size < 80

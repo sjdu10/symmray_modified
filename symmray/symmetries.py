@@ -27,6 +27,11 @@ class Symmetry(ABC):
         """Return the parity, 0 or 1, of a charge according to the symmetry."""
         raise NotImplementedError
 
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.__class__.__name__ == other
+        return self.__class__ == other.__class__
+
     def __hash__(self):
         return hash(self.__class__)
 
@@ -57,6 +62,24 @@ class Z2(Symmetry):
 
     def sign(self, charge, dual=True):
         # Z2 is self-inverse
+        return charge
+
+    def parity(self, charge):
+        return charge % 2
+
+
+class Z4(Symmetry):
+    __slots__ = ()
+
+    def valid(self, *charges):
+        return all(charge in {0, 1, 2, 3} for charge in charges)
+
+    def combine(self, *charges):
+        return sum(charges) % 4
+
+    def sign(self, charge, dual=True):
+        if dual:
+            return 4 - charge
         return charge
 
     def parity(self, charge):
@@ -144,6 +167,8 @@ def get_symmetry(symmetry):
     """
     if symmetry == "Z2":
         return Z2()
+    elif symmetry == "Z4":
+        return Z4()
     elif symmetry == "U1":
         return U1()
     elif symmetry == "Z2Z2":
@@ -181,15 +206,65 @@ def calc_phase_permutation(parities, perm=None):
 
     moved = set()
     swaps = 0
+    
+    # # NOTE: Dynamical sign calculation, JAX incompatible
+    # for ax in perm:
+    #     # we are moving charge at ax to the beginning
+    #     if parities[ax]:
+    #         # if it is odd, count how many odd charges it crosses
+    #         for other_ax in range(ax):
+    #             if other_ax not in moved and parities[other_ax]:
+    #                 swaps += 1
+    #     moved.add(ax)
+
+    # if swaps % 2:
+    #     return -1
+    # return 1
+    
+    # NOTE: Cumulative sign calculation, JAX compatible
     for ax in perm:
-        # we are moving charge at ax to the beginning
-        if parities[ax]:
-            # if it is odd, count how many odd charges it crosses
-            for other_ax in range(ax):
-                if other_ax not in moved and parities[other_ax]:
-                    swaps += 1
+        # NOTE: range(ax) is equivalent to range(0, ax), 
+        # count the number of permutations of a large index with smaller indices that are not moved.
+        # Permutation is just a reordering of the axes, so we can just count the number of swaps (parity of the permutation)
+        for other_ax in range(ax): 
+            if other_ax not in moved:
+                swaps += parities[ax]*parities[other_ax]
         moved.add(ax)
 
-    if swaps % 2:
-        return -1
-    return 1
+    return (-1)**(swaps % 2)
+    
+import jax.numpy as jnp
+def calc_phase_permutation_JAX(parities, perm=None):
+    """Given sequence of parities and a permutation, compute the phase of the
+    permutation acting on the odd charges. I.e. whether the number of swaps
+    of odd sectors is even or odd.
+
+    Parameters
+    ----------
+    parities : tuple of int
+        The parities of the sectors.
+    perm : tuple of int, optional
+        The permutation of axes, by default None, which flips all axes.
+
+    Returns
+    -------
+    int
+        The phase of the permutation, either 1 or -1.
+    """
+    if perm is None:
+        # assume flipping all
+        if sum(parities) // 2 % 2:
+            return -1
+        return 1
+
+    moved = jnp.zeros(len(parities), dtype=bool)  # Use a boolean mask to track moved elements
+    swaps = 0
+    # NOTE: Cumulative sign calculation, JAX compatible
+    for ax in perm:
+        for other_ax in range(ax): # BUG: must not use range(ax) as this is not JAX compatible
+            if not moved[other_ax]:
+                swaps += parities[ax]*parities[other_ax]
+        # Update the moved mask
+        moved = moved.at[ax].set(True)
+
+    return (-1)**(swaps % 2)

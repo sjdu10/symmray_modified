@@ -317,7 +317,9 @@ def reshape_to_fuse_axes(shape, newshape):
     groups = []
     group = []
     for dnew in newshape:
-        while dnew > d:
+        # while dnew > d: # NOTE: Sijing: this will skip the case where dnew == d == 1, thus fails when fusing (1,1) to (1,)
+        # FIXME: needs closer inspection
+        while d < dnew or (d == dnew == 1 and not group):
             # accumulate the next axis
             d *= shape[i]
             group.append(i)
@@ -582,6 +584,7 @@ _AbelianArray_slots = (
     "_indices",
     "_blocks",
     "_charge",
+    "_symmetry",
 )
 
 
@@ -598,20 +601,25 @@ class AbelianArray(BlockBase):
         are given.
     blocks : dict[tuple[hashable], array_like]
         A mapping of each 'sector' (tuple of charges) to the data array.
+    symmetry : str or Symmetry, optional
+        The symmetry of the array, if not using a specific symmetry class.
     """
 
     __slots__ = _AbelianArray_slots
     fermionic = False
+    static_symmetry = False
 
     def __init__(
         self,
         indices,
         charge=None,
         blocks=(),
+        symmetry=None,
     ):
         self._indices = tuple(indices)
         self._blocks = dict(blocks)
-
+        self._symmetry = self.get_class_symmetry(symmetry) 
+        
         if charge is None:
             if self._blocks:
                 # infer the charge total from any sector
@@ -622,9 +630,17 @@ class AbelianArray(BlockBase):
                 self._charge = self.symmetry.combine()
         else:
             self._charge = charge
+            
+        # self._symmetry = self.get_class_symmetry(symmetry) #BUG: this should be set before charge is set
 
         if DEBUG:
             self.check()
+
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        if symmetry is None:
+            raise ValueError("Symmetry must be given.")
+        return get_symmetry(symmetry)
 
     def copy(self):
         """Copy this block array."""
@@ -632,6 +648,7 @@ class AbelianArray(BlockBase):
         new._indices = self._indices
         new._charge = self._charge
         new._blocks = self._blocks.copy()
+        new._symmetry = self._symmetry
         return new
 
     def copy_with(self, indices=None, charge=None, blocks=None):
@@ -639,11 +656,17 @@ class AbelianArray(BlockBase):
         new._indices = self._indices if indices is None else indices
         new._charge = self._charge if charge is None else charge
         new._blocks = self._blocks.copy() if blocks is None else blocks
+        new._symmetry = self._symmetry
 
         if DEBUG:
             new.check()
 
         return new
+
+    @property
+    def symmetry(self):
+        """The symmetry object of the array."""
+        return self._symmetry
 
     @property
     def indices(self):
@@ -733,6 +756,7 @@ class AbelianArray(BlockBase):
                 ),
                 last_dual,
             )
+
             if required_charge in last_charges:
                 # but only if it is a valid charge for that index
                 yield partial_sector + (required_charge,)
@@ -829,6 +853,8 @@ class AbelianArray(BlockBase):
                 assert ar.shape(array)[ax] == ar.size(v_block)
 
         else:
+            assert self.symmetry == other.symmetry
+
             axes_a, axes_b = args
             for axa, axb in zip(axes_a, axes_b):
                 assert self.indices[axa].matches(other.indices[axb])
@@ -876,6 +902,7 @@ class AbelianArray(BlockBase):
         fill_fn,
         indices,
         charge=None,
+        symmetry=None,
         **kwargs,
     ):
         """Generate a block array from a filling function. Every valid sector
@@ -890,17 +917,21 @@ class AbelianArray(BlockBase):
         charge : hashable
             The total charge of the array. If not given, it will be
             taken as the identity / zero element.
+        symmetry : str or Symmetry, optional
+            The symmetry of the array, if not using a specific symmetry class.
 
         Returns
         -------
         AbelianArray
         """
+        symmetry = cls.get_class_symmetry(symmetry)
+
         if charge is None:
-            charge = cls.symmetry.combine()
+            charge = symmetry.combine()
         else:
             charge = charge
 
-        new = cls(indices=indices, charge=charge, **kwargs)
+        new = cls(indices=indices, charge=charge, symmetry=symmetry, **kwargs)
 
         for sector in new.gen_valid_sectors():
             new.blocks[sector] = fill_fn(new.get_block_shape(sector))
@@ -908,7 +939,15 @@ class AbelianArray(BlockBase):
         return new
 
     @classmethod
-    def random(cls, indices, charge=None, seed=None, dist="normal", **kwargs):
+    def random(
+        cls,
+        indices,
+        charge=None,
+        seed=None,
+        dist="normal",
+        symmetry=None,
+        **kwargs,
+    ):
         """Create a block array with random values.
 
         Parameters
@@ -923,6 +962,12 @@ class AbelianArray(BlockBase):
         dist : str
             The distribution to use. Can be one of ``"normal"``, ``"uniform"``,
             etc., see :func:`numpy.random.default_rng` for details.
+        symmetry : str or Symmetry, optional
+            The symmetry of the array, if not using a specific symmetry class.
+
+        Returns
+        -------
+        AbelianArray
         """
         import numpy as np
 
@@ -932,10 +977,14 @@ class AbelianArray(BlockBase):
         def fill_fn(shape):
             return rand_fn(size=shape)
 
-        return cls.from_fill_fn(fill_fn, indices, charge, **kwargs)
+        return cls.from_fill_fn(
+            fill_fn, indices, charge, symmetry=symmetry, **kwargs
+        )
 
     @classmethod
-    def from_blocks(cls, blocks, duals, charge=None, **kwargs):
+    def from_blocks(
+        cls, blocks, duals, charge=None, symmetry=symmetry, **kwargs
+    ):
         """Create a block array from a dictionary of blocks and sequence of
         duals.
 
@@ -948,13 +997,17 @@ class AbelianArray(BlockBase):
         charge : hashable
             The total charge of the array. If not given, it will be
             taken as the identity / zero element.
+        symmetry : str or Symmetry, optional
+            The symmetry of the array, if not using a specific symmetry class.
 
         Returns
         -------
         AbelianArray
         """
+        symmetry = cls.get_class_symmetry(symmetry)
+
         if charge is None:
-            charge = cls.symmetry.combine()
+            charge = symmetry.combine()
         else:
             charge = charge
 
@@ -981,10 +1034,18 @@ class AbelianArray(BlockBase):
             BlockIndex(x, dual) for x, dual in zip(charge_size_maps, duals)
         )
 
-        return cls(blocks=blocks, indices=indices, charge=charge, **kwargs)
+        return cls(
+            blocks=blocks,
+            indices=indices,
+            charge=charge,
+            symmetry=symmetry,
+            **kwargs,
+        )
 
     @classmethod
-    def from_dense(cls, array, index_maps, duals, charge=None, **kwargs):
+    def from_dense(
+        cls, array, index_maps, duals, charge=None, symmetry=symmetry, **kwargs
+    ):
         """Create a block array from a dense array by supplying a mapping for
         each axis that labels each linear index with a particular charge.
 
@@ -1001,11 +1062,14 @@ class AbelianArray(BlockBase):
         charge : hashable
             The total charge of the array. If not given, it will be
             taken as the identity / zero element.
+        symmetry : str or Symmetry, optional
+            The symmetry of the array, if not using a specific symmetry class.
         """
         # XXX: warn if invalid blocks are non-zero?
+        symmetry = cls.get_class_symmetry()
 
         if charge is None:
-            charge = cls.symmetry.combine()
+            charge = symmetry.combine()
 
         # first we work out which indices of which axes belong to which charges
         charge_groups = []
@@ -1033,10 +1097,9 @@ class AbelianArray(BlockBase):
             else:
                 # we have reached a fully specified block
                 signed_sector = tuple(
-                    cls.symmetry.sign(c, dual)
-                    for c, dual in zip(sector, duals)
+                    symmetry.sign(c, dual) for c, dual in zip(sector, duals)
                 )
-                if cls.symmetry.combine(*signed_sector) == charge:
+                if symmetry.combine(*signed_sector) == charge:
                     # ... but only add valid ones:
                     blocks[sector] = ary
 
@@ -1050,7 +1113,13 @@ class AbelianArray(BlockBase):
         ]
 
         # create the block array!
-        return cls(blocks=blocks, indices=indices, charge=charge, **kwargs)
+        return cls(
+            blocks=blocks,
+            indices=indices,
+            charge=charge,
+            symmetry=symmetry,
+            **kwargs,
+        )
 
     def to_dense(self):
         """Convert this block array to a dense array."""
@@ -1163,8 +1232,10 @@ class AbelianArray(BlockBase):
             new_indices,
             blockmap,
         ) = cached_fuse_block_info(self, axes_groups)
+        # ) = calc_fuse_block_info(self, axes_groups)
 
-        backend = self.backend
+        _ex_array = self.get_any_array()
+        backend = ar.infer_backend(_ex_array)
         _transpose = ar.get_lib_fn(backend, "transpose")
         _reshape = ar.get_lib_fn(backend, "reshape")
         _concatenate = ar.get_lib_fn(backend, "concatenate")
@@ -1178,29 +1249,26 @@ class AbelianArray(BlockBase):
             # group the subblock into the correct new fused block
             new_blocks.setdefault(new_sector, {})[subsectors] = new_array
 
-        old_indices = self._indices
-
         # explicity handle zeros function and dtype and device kwargs
-        _ex_array = self.get_any_array()
-        backend = ar.infer_backend(_ex_array)
         _zeros = ar.get_lib_fn(backend, "zeros")
-        zeros_kwargs = {"dtype": _ex_array.dtype}
+        zeros_kwargs = {}
+        if hasattr(_ex_array, "dtype"):
+            zeros_kwargs["dtype"] = _ex_array.dtype
         if hasattr(_ex_array, "device"):
             zeros_kwargs["device"] = _ex_array.device
 
-        def _recurse_sorted_concat(new_sector, g=0, subkey=()):
+        old_indices = self._indices
+
+        def _recurse_concat(new_sector, g=0, subkey=()):
             new_charge = new_sector[position + g]
-            new_subkeys = [
-                (*subkey, subsector)
-                for subsector in new_indices[position + g].subinfo.extents[
-                    new_charge
-                ]
-            ]
+            extent = new_indices[position + g].subinfo.extents[new_charge]
+            # given the current partial sector, get each next possible charge
+            next_subkeys = [(*subkey, subsector) for subsector in extent]
 
             if g == num_groups - 1:
                 # final group (/level of recursion), get actual arrays
                 arrays = []
-                for new_subkey in new_subkeys:
+                for new_subkey in next_subkeys:
                     try:
                         array = new_blocks[new_sector][new_subkey]
                     except KeyError:
@@ -1210,11 +1278,10 @@ class AbelianArray(BlockBase):
                             for ax in axes_before
                         )
                         shape_new = (
-                            new_indices[position + g].subinfo.extents[
-                                new_charge
+                            new_indices[position + gg].subinfo.extents[
+                                new_sector[position + gg]
                             ][ss]
-                            # subinfos[g][ss][1]
-                            for g, ss in enumerate(new_subkey)
+                            for gg, ss in enumerate(new_subkey)
                         )
                         shape_after = (
                             old_indices[ax].size_of(new_sector[new_axes[ax]])
@@ -1226,14 +1293,14 @@ class AbelianArray(BlockBase):
             else:
                 # recurse to next group
                 arrays = (
-                    _recurse_sorted_concat(new_sector, g + 1, new_subkey)
-                    for new_subkey in new_subkeys
+                    _recurse_concat(new_sector, g + 1, new_subkey)
+                    for new_subkey in next_subkeys
                 )
 
             return _concatenate(tuple(arrays), axis=position + g)
 
         new_blocks = {
-            new_sector: _recurse_sorted_concat(new_sector)
+            new_sector: _recurse_concat(new_sector)
             for new_sector in new_blocks
         }
 
@@ -1242,10 +1309,7 @@ class AbelianArray(BlockBase):
             self._blocks = new_blocks
             return self
         else:
-            return self.copy_with(
-                indices=new_indices,
-                blocks=new_blocks,
-            )
+            return self.copy_with(indices=new_indices, blocks=new_blocks)
 
     def unfuse(self, axis, inplace=False):
         """Unfuse the ``axis`` index, which must carry subindex information,
@@ -1332,6 +1396,11 @@ class AbelianArray(BlockBase):
 
     def _reshape_via_fuse(self, newshape):
         axes_groups = reshape_to_fuse_axes(self.shape, newshape)
+
+        # NOTE: Sijing: a workaround to handle case of fusing (1,1) to (1,)
+        if axes_groups==() and self.shape==(1,1) and newshape==(1,):
+            axes_groups=((0,1),)
+        
         return self.fuse(*axes_groups)
 
     def _reshape_via_unfuse(self, newshape):
@@ -1344,10 +1413,11 @@ class AbelianArray(BlockBase):
 
     def reshape(self, newshape):
         """Reshape the block array to ``newshape``, assuming it can be done by
-        purly fusing, or unfusing the relevant indices.
+        purly fusing (possibly with additional dummy indices), or unfusing the relevant indices.
         """
         if not isinstance(newshape, tuple):
             newshape = tuple(newshape)
+
         newshape = find_full_reshape(newshape, self.size)
         if len(newshape) < self.ndim:
             return self._reshape_via_fuse(newshape)
@@ -1355,8 +1425,29 @@ class AbelianArray(BlockBase):
             return self._reshape_via_unfuse(newshape)
         elif newshape == self.shape:
             return self.copy()
+        elif len(newshape) == 2 and (1 in newshape):
+            # psuedo vector
+            no_unit_newshape = tuple([i for i in newshape if i != 1])
+            array = self._reshape_via_fuse(no_unit_newshape)
+            if newshape[0] == 1:
+                new_ind = BlockIndex(chargemap={0:1}, dual=False)
+                new_indices = (new_ind, *array._indices)
+                new_blocks = {}
+                for sector, block in array.blocks.items():
+                    new_blocks[(0, *sector)] = block.reshape((1, *block.shape))
+            elif newshape[1] == 1:
+                new_ind = BlockIndex(chargemap={0:1}, dual=False)
+                new_indices = (*array._indices, new_ind)
+                new_blocks = {}
+                for sector, block in array.blocks.items():
+                    new_blocks[(*sector, 0)] = block.reshape((*block.shape, 1))
+            array._indices = new_indices
+            array._blocks = new_blocks
+            return self.copy_with(indices=new_indices, blocks=new_blocks)
         else:
-            raise ValueError("reshape must be pure fuse or unfuse.")
+            raise ValueError("reshape must be pure fuse or unfuse (or return a psuedo vector).")
+
+
 
     def __matmul__(self, other):
         if self.ndim != 2 or other.ndim != 2:
@@ -1449,9 +1540,15 @@ class AbelianArray(BlockBase):
 
     def __repr__(self):
         pattern = "".join("-" if f else "+" for f in self.duals)
+
+        if self.static_symmetry:
+            c = f"{self.__class__.__name__}("
+        else:
+            c = f"{self.__class__.__name__}{self.symmetry}("
+
         return "".join(
             [
-                f"{self.__class__.__name__}(",
+                c,
                 (
                     f"shape~{self.shape}:" f"[{pattern}]"
                     if self.indices
@@ -1518,15 +1615,26 @@ def _tensordot_blockwise(a, b, left_axes, axes_a, axes_b, right_axes):
     #         )
 
     for sector, (arrays_suba, arrays_subb) in new_blocks.items():
-        new_blocks[sector] = functools.reduce(
-            operator.add,
-            (
-                _tensordot(a, b, axes=(axes_a, axes_b))
-                for a, b in zip(arrays_suba, arrays_subb)
-            ),
-        )
+        try:
+            new_blocks[sector] = functools.reduce(
+                operator.add,
+                (
+                    _tensordot(aa, bb, axes=(axes_a, axes_b))
+                    for aa, bb in zip(arrays_suba, arrays_subb)
+                ),
+            )
+        except ValueError as e:
+            # print(a.blocks, b.blocks)
+            a.check()
+            b.check()
+            for a, b in zip(arrays_suba, arrays_subb):
+                print(axes_a, axes_b)
+                print(a.shape, b.shape)
+            raise ValueError(
+                f"Error when contracting blocks for sector {sector}: {e}")
 
     new = a.__new__(a.__class__)
+    new._symmetry = a.symmetry
     new._indices = without(a.indices, axes_a) + without(b.indices, axes_b)
     new._charge = new.symmetry.combine(a.charge, b.charge)
     new._blocks = new_blocks
@@ -1594,7 +1702,8 @@ def _tensordot_via_fused(a, b, left_axes, axes_a, axes_b, right_axes):
 
     if not a.blocks or not b.blocks:
         # no aligned sectors, return empty array
-        return a.copy_with(
+        ts = b if b.parity == 1 else a #NOTE: Sijing: added to deal with odd parity tensor, only works for Z2 symmetry
+        return ts.copy_with(
             indices=without(a.indices, axes_a) + without(b.indices, axes_b),
             charge=a.symmetry.combine(a.charge, b.charge),
             blocks={},
@@ -1603,7 +1712,7 @@ def _tensordot_via_fused(a, b, left_axes, axes_a, axes_b, right_axes):
     # fuse into matrices or maybe vectors
     af = AbelianArray.fuse(a, left_axes, axes_a)
     bf = AbelianArray.fuse(b, axes_b, right_axes)
-
+    # print(af.blocks, bf.blocks)
     # handle potential vector and scalar cases
     left_axes, axes_a = {
         (False, False): ((), ()),  # left scalar
@@ -1621,12 +1730,12 @@ def _tensordot_via_fused(a, b, left_axes, axes_a, axes_b, right_axes):
 
     # tensordot the fused blocks
     cf = _tensordot_blockwise(af, bf, left_axes, axes_a, axes_b, right_axes)
-
+    
     # unfuse result into (*left_axes, *right_axes)
     for ax in reversed(range(cf.ndim)):
         if cf.indices[ax].subinfo is not None:
             AbelianArray.unfuse(cf, ax, inplace=True)
-
+    # print(cf.blocks)
     return cf
 
 
@@ -1685,7 +1794,7 @@ def tensordot_abelian(a, b, axes=2, mode="auto", preserve_array=False):
         _tdot = _tensordot_blockwise
     else:
         raise ValueError(f"Unknown tensordot mode: {mode}.")
-
+    # print("mode", mode)
     c = _tdot(a, b, left_axes, axes_a, axes_b, right_axes)
 
     if DEBUG:
@@ -1714,8 +1823,16 @@ class Z2Array(AbelianArray):
     """A block array with Z2 symmetry."""
 
     __slots__ = _AbelianArray_slots
+    static_symmetry = True
 
-    symmetry = get_symmetry("Z2")
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        Z2 = get_symmetry("Z2")
+
+        if (symmetry is not None) and (symmetry != Z2):
+            raise ValueError(f"Expected Z2 symmetry, got {symmetry}.")
+
+        return Z2
 
     def to_pyblock3(self, flat=False):
         from pyblock3.algebra.core import SparseTensor, SubTensor
@@ -1742,8 +1859,16 @@ class U1Array(AbelianArray):
     """A block array with U1 symmetry."""
 
     __slots__ = _AbelianArray_slots
+    static_symmetry = True
 
-    symmetry = get_symmetry("U1")
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        U1 = get_symmetry("U1")
+
+        if (symmetry is not None) and (symmetry != U1):
+            raise ValueError(f"Expected U1 symmetry, got {symmetry}.")
+
+        return U1
 
     def to_pyblock3(self, flat=False):
         from pyblock3.algebra.core import SparseTensor, SubTensor
@@ -1783,13 +1908,29 @@ class Z2Z2Array(AbelianArray):
     """A block array with Z2 x Z2 symmetry."""
 
     __slots__ = _AbelianArray_slots
+    static_symmetry = True
 
-    symmetry = get_symmetry("Z2Z2")
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        Z2Z2 = get_symmetry("Z2Z2")
+
+        if (symmetry is not None) and (symmetry != Z2Z2):
+            raise ValueError(f"Expected Z2Z2 symmetry, got {symmetry}.")
+
+        return Z2Z2
 
 
 class U1U1Array(AbelianArray):
     """A block array with U1 x U1 symmetry."""
 
     __slots__ = _AbelianArray_slots
+    static_symmetry = True
 
-    symmetry = get_symmetry("U1U1")
+    @staticmethod
+    def get_class_symmetry(symmetry=None):
+        U1U1 = get_symmetry("U1U1")
+
+        if (symmetry is not None) and (symmetry != U1U1):
+            raise ValueError(f"Expected U1U1 symmetry, got {symmetry}.")
+
+        return U1U1

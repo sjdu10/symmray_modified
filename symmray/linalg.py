@@ -5,7 +5,8 @@ import autoray as ar
 from .block_core import BlockVector
 from .fermionic_core import FermionicArray
 from .abelian_core import BlockIndex, AbelianArray
-from .utils import DEBUG
+from .utils import DEBUG, DENSE_TENSOR
+import os
 
 
 def norm(x):
@@ -74,16 +75,56 @@ def qr(x, stabilized=False):
     q_blocks = {}
     r_blocks = {}
     new_chargemap = {}
+    DENSE_TENSOR = 0 if os.environ.get('DENSE_TENSOR') is None else int(os.environ.get('DENSE_TENSOR'))
+    
+    if not DENSE_TENSOR:
+        for sector, array in x.blocks.items():
+            q, r = _qr(array)
+            q_blocks[sector] = q
+            new_chargemap[sector[1]] = ar.shape(q)[1]
+            # on r charge is 0, and dualnesses always opposite
+            r_sector = (sector[1], sector[1])
+            r_blocks[r_sector] = r
 
-    for sector, array in x.blocks.items():
-        q, r = _qr(array)
-        q_blocks[sector] = q
-        new_chargemap[sector[1]] = ar.shape(q)[1]
-        # on r charge is 0, and dualnesses always opposite
-        r_sector = (sector[1], sector[1])
-        r_blocks[r_sector] = r
+        bond_index = BlockIndex(new_chargemap, dual=x.indices[1].dual)
+    else:
+        try:
+            if int(os.environ.get('DENSE_TENSOR_DEBUG')):
+                print("DENSE_TENSOR QR")
+        except:
+            pass
+        # record the shape under the asumption of block-wise QR
+        for sector, array in x.blocks.items():
+            q, r = _qr(array)
+            new_chargemap[sector[1]] = ar.shape(q)[1]
+        # the shape of the block matrices are now stored in x.chargemap and new_chargemap
+        # full matrix QR
+        q, r = _qr(x.to_dense())
+        bond_index = BlockIndex(new_chargemap, dual=x.indices[1].dual)
+        # partition the q and r matrices into blocks
+        accumulated_size_qx = 0
+        for charge, size in x.indices[0].chargemap.items():
+            accumulated_size_qy = 0
+            for new_charge, new_size in new_chargemap.items():
+                q_blocks[(charge, new_charge)] = q[accumulated_size_qx:accumulated_size_qx+size, accumulated_size_qy:accumulated_size_qy+new_size]
+                accumulated_size_qy += new_size
+            accumulated_size_qx += size
 
-    bond_index = BlockIndex(new_chargemap, dual=x.indices[1].dual)
+        accumulated_size_rx = 0
+        for new_charge, new_size in new_chargemap.items():
+            accumulated_size_ry = 0
+            for charge, size in x.indices[1].chargemap.items():
+                r_blocks[(new_charge, charge)] = r[accumulated_size_rx:accumulated_size_rx+new_size, accumulated_size_ry:accumulated_size_ry+size]
+                accumulated_size_ry += size
+            accumulated_size_rx += new_size
+            
+        # print((q@r == x.to_dense()))
+        # print(q@r)
+        # print(x.to_dense())
+        # print(x.indices[0].chargemap, x.indices[1].chargemap, new_chargemap)
+        # print(q_blocks)
+        # exit()
+
 
     q = x.copy_with(
         indices=(x.indices[0].copy(), bond_index),
@@ -93,13 +134,13 @@ def qr(x, stabilized=False):
         indices=(bond_index.conj(), x.indices[1].copy()),
         charge=x.symmetry.combine(),
         blocks=r_blocks,
+        symmetry=x.symmetry,
     )
 
     if DEBUG:
         q.check()
         r.check()
         q.check_with(r, (1,), (0,))
-
     return q, r
 
 
@@ -134,17 +175,37 @@ def svd(x):
     v_blocks = {}
     new_chargemap = {}
 
-    for sector, array in x.blocks.items():
-        u, s, v = _svd(array)
-        u_blocks[sector] = u
-        # v charge is 0, and dualnesses always opposite
-        s_charge = sector[1]
-        v_sector = (s_charge, s_charge)
-        s_store[s_charge] = s
-        v_blocks[v_sector] = v
-        new_chargemap[sector[1]] = ar.shape(u)[1]
+    DENSE_TENSOR = 0 if os.environ.get('DENSE_TENSOR') is None else int(os.environ.get('DENSE_TENSOR'))
 
-    bond_index = BlockIndex(new_chargemap, dual=x.indices[1].dual)
+    if not DENSE_TENSOR:
+        for sector, array in x.blocks.items():
+            u, s, v = _svd(array)
+            # print(u.shape, s.shape, v.shape)
+            u_blocks[sector] = u
+            # v charge is 0, and dualnesses always opposite
+            s_charge = sector[1]
+            v_sector = (s_charge, s_charge)
+            s_store[s_charge] = s
+            v_blocks[v_sector] = v
+            new_chargemap[sector[1]] = ar.shape(u)[1]
+
+        bond_index = BlockIndex(new_chargemap, dual=x.indices[1].dual)
+
+    else:
+        try:
+            if int(os.environ.get('DENSE_TENSOR_DEBUG')):
+                # print("DENSE_TENSOR SVD")
+                ...
+        except:
+            pass
+        for sector, array in x.blocks.items():
+            u, s, v = _svd(array)
+            u_blocks[sector] = u
+            s_store[sector] = s
+            v_blocks[sector] = v
+            new_chargemap[sector[1]] = ar.shape(u)[1]
+
+        bond_index = BlockIndex(new_chargemap, dual=x.indices[1].dual)
 
     u = x.copy_with(
         indices=(x.indices[0], bond_index),
@@ -155,7 +216,11 @@ def svd(x):
         indices=(bond_index.conj(), x.indices[1]),
         charge=x.symmetry.combine(),
         blocks=v_blocks,
+        symmetry=x.symmetry,
     )
+
+    # if int(os.environ.get('DENSE_TENSOR_DEBUG')):
+    #     print(u.to_dense(), s.to_dense())
 
     if DEBUG:
         u.check()
@@ -188,6 +253,10 @@ def calc_sub_max_bonds(sizes, max_bond):
     if max_bond < 0:
         # no limit
         return sizes
+    
+    # NOTE: Sijing sizes may be 0
+    if sum(sizes) == 0:
+        return sizes
 
     # overall fraction of the total bond dimension to use
     frac = max_bond / sum(sizes)
@@ -210,7 +279,7 @@ def calc_sub_max_bonds(sizes, max_bond):
 def svd_truncated(
     x, cutoff=-1.0, cutoff_mode=4, max_bond=-1, absorb=0, renorm=0
 ):
-    """Truncated svd or raw array ``x``.
+    """Truncated svd for raw array ``x``.
 
     Parameters
     ----------
@@ -293,28 +362,62 @@ def svd_truncated(
         sub_max_bonds = calc_sub_max_bonds(sector_sizes, max_bond)
 
     new_inner_chargemap = {}
-    for (c0, c1), n_chi in zip(U.sectors, sub_max_bonds):
-        # check how many singular values from this sector are valid
-        if n_chi == 0:
-            # remove this sector entirely
-            U.blocks.pop((c0, c1))
-            s.blocks.pop(c1)
-            VH.blocks.pop((c1, c1))
-            continue
 
-        # slice the values and left and right vectors
-        U.blocks[(c0, c1)] = U.blocks[(c0, c1)][:, :n_chi]
-        s.blocks[c1] = s.blocks[c1][:n_chi]
-        VH.blocks[(c1, c1)] = VH.blocks[(c1, c1)][:n_chi, :]
+    DENSE_TENSOR = 0 if os.environ.get('DENSE_TENSOR') is None else int(os.environ.get('DENSE_TENSOR'))
 
-        # make sure the index chargemaps are updated too
-        new_inner_chargemap[c1] = n_chi
+    if not DENSE_TENSOR:
+        for (c0, c1), n_chi in zip(U.sectors, sub_max_bonds):
+            # check how many singular values from this sector are valid
+            if n_chi == 0:
+                # remove this sector entirely
+                U.blocks.pop((c0, c1))
+                s.blocks.pop(c1)
+                VH.blocks.pop((c1, c1))
+                continue
 
-    new_inner_chargemap = {
-        k: new_inner_chargemap[k] for k in sorted(new_inner_chargemap)
-    }
-    U.indices[1]._chargemap = new_inner_chargemap
-    VH.indices[0]._chargemap = new_inner_chargemap.copy()
+            # slice the values and left and right vectors
+            U.blocks[(c0, c1)] = U.blocks[(c0, c1)][:, :n_chi]
+            s.blocks[c1] = s.blocks[c1][:n_chi]
+            VH.blocks[(c1, c1)] = VH.blocks[(c1, c1)][:n_chi, :]
+
+            # make sure the index chargemaps are updated too
+            new_inner_chargemap[c1] = n_chi
+
+        new_inner_chargemap = {
+            k: new_inner_chargemap[k] for k in sorted(new_inner_chargemap)
+        }
+        U.indices[1]._chargemap = new_inner_chargemap
+        VH.indices[0]._chargemap = new_inner_chargemap.copy()
+
+    else:
+        # s is essentially a BlockMatrix!
+        assert max_bond == -1 or max_bond % 2 == 0
+
+        for (c0, c1), n_chi in zip(U.sectors, sub_max_bonds):
+            # check how many singular values from this sector are valid
+            if n_chi == 0:
+                # remove this sector entirely
+                U.blocks.pop((c0, c1))
+                s.blocks.pop((c0, c1))
+                VH.blocks.pop((c1, c1))
+                continue
+
+            # slice the values and left and right vectors
+            U.blocks[(c0, c1)] = U.blocks[(c0, c1)][:, :n_chi]
+            s.blocks[(c0,c1)] = s.blocks[(c0,c1)][:n_chi]
+            VH.blocks[(c0, c1)] = VH.blocks[(c0, c1)][:n_chi, :]
+
+            # make sure the index chargemaps are updated too
+            new_inner_chargemap[c1] = n_chi
+
+        new_inner_chargemap = {
+            k: new_inner_chargemap[k] for k in sorted(new_inner_chargemap)
+        }
+        U.indices[1]._chargemap = new_inner_chargemap
+        VH.indices[0]._chargemap = new_inner_chargemap.copy()
+
+        if absorb is None:
+            return U, s, VH
 
     if absorb is None:
         if DEBUG:
